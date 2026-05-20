@@ -15,14 +15,17 @@ TOKEN = os.environ.get('TOKEN', '8965196111:AAFsNCnmRTVsAUsSIKkZiIDCCzB6HSe_-OQ'
 ADMIN_ID = int(os.environ.get('ADMIN_ID', '5706071030'))
 PORT = int(os.environ.get('PORT', 10000))
 
+print(f"🔑 Токен загружен: {'Да' if TOKEN else 'Нет'}")
+print(f"👑 Админ ID: {ADMIN_ID}")
+print(f"🌐 Порт: {PORT}")
+
 bot = telebot.TeleBot(TOKEN)
 
-# ========== ВЕБ-СЕРВЕР (для UptimeRobot) ==========
+# ========== ВЕБ-СЕРВЕР ==========
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    """Главная страница - проверка что бот жив"""
     return jsonify({
         "status": "online",
         "bot": "EXTRABET",
@@ -31,33 +34,28 @@ def home():
 
 @app.route('/ping')
 def ping():
-    """Эндпоинт для UptimeRobot"""
     return "pong"
 
 @app.route('/health')
 def health():
-    """Эндпоинт для проверки здоровья"""
-    return jsonify({
-        "status": "healthy",
-        "uptime": "24/7"
-    })
+    return jsonify({"status": "healthy"})
 
 def run_web_server():
-    """Запускает Flask сервер"""
-    app.run(host='0.0.0.0', port=PORT)
+    print(f"🌐 Запуск веб-сервера на порту {PORT}...")
+    app.run(host='0.0.0.0', port=PORT, debug=False)
 
-# ========== САМО-ПИНГ (дополнительная защита от засыпания) ==========
+# ========== САМО-ПИНГ ==========
 def self_ping():
-    """Пингует сам себя каждые 10 минут"""
-    time.sleep(120)  # Ждём 2 минуты после старта
+    time.sleep(60)
+    print("🔄 Само-пинг активирован")
     while True:
         try:
             import requests
-            requests.get(f'http://localhost:{PORT}/ping', timeout=10)
-            print("✅ Само-пинг успешен")
+            response = requests.get(f'http://localhost:{PORT}/ping', timeout=10)
+            print(f"✅ Само-пинг: {response.status_code}")
         except Exception as e:
-            print(f"⚠️ Само-пинг: {e}")
-        time.sleep(600)  # 10 минут
+            print(f"⚠️ Само-пинг ошибка: {e}")
+        time.sleep(600)
 
 # ========== ВРЕМЕННЫЕ ХРАНИЛИЩА ==========
 user_match_creation = {}
@@ -65,6 +63,7 @@ user_bet_amount = {}
 
 # ========== БАЗА ДАННЫХ ==========
 def init_db():
+    print("📦 Инициализация базы данных...")
     conn = sqlite3.connect('hockey_bets.db')
     c = conn.cursor()
     
@@ -122,6 +121,7 @@ def init_db():
     
     conn.commit()
     conn.close()
+    print("✅ База данных готова")
 
 # ========== ГЕНЕРАЦИЯ КОДА ==========
 def generate_promo_code(length=8):
@@ -133,7 +133,7 @@ def safe_send_message(chat_id, text, reply_markup=None):
     try:
         return bot.send_message(chat_id, text, reply_markup=reply_markup)
     except Exception as e:
-        print(f"Ошибка отправки: {e}")
+        print(f"Ошибка отправки в {chat_id}: {e}")
         time.sleep(1)
         try:
             return bot.send_message(chat_id, text, reply_markup=reply_markup)
@@ -296,6 +296,7 @@ def start(message):
     c.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (user_id, username))
     conn.commit()
     conn.close()
+    print(f"👤 Новый пользователь: {username} (ID: {user_id})")
     welcome_text = "🏒 ДОБРО ПОЖАЛОВАТЬ В EXTRABET!\n\n💰 Ваш стартовый баланс: 1000 монет\n\n📋 Меню находится снизу"
     if user_id == ADMIN_ID:
         safe_send_message(message.chat.id, welcome_text, admin_keyboard())
@@ -877,7 +878,7 @@ def place_bet_direct(user_id, match_id, team, amount, chat_id):
     conn.close()
     safe_send_message(chat_id, f"✅ Ставка принята!\n💰 {amount} на {team}")
 
-# ========== ЗАПУСК 24/7 ==========
+# ========== ЗАПУСК ==========
 if __name__ == '__main__':
     print("=" * 50)
     print("🏒 EXTRABET ЗАПУСКАЕТСЯ...")
@@ -885,21 +886,24 @@ if __name__ == '__main__':
     
     # База данных
     init_db()
-    print("✅ База данных готова")
     
-    # Веб-сервер для UptimeRobot
+    # Веб-сервер
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
     print(f"🌐 Веб-сервер на порту {PORT}")
-    print(f"   Пинг: http://localhost:{PORT}/ping")
-    print(f"   Здоровье: http://localhost:{PORT}/health")
     
     # Само-пинг
     ping_thread = threading.Thread(target=self_ping, daemon=True)
     ping_thread.start()
-    print("🔄 Само-пинг каждые 10 минут")
     
     # Запуск бота
-    print("🤖 Бот запущен!")
+    print("🤖 Бот запущен! Жду сообщения...")
     print("=" * 50)
-    bot.infinity_polling(timeout=30, long_polling_timeout=60)
+    
+    while True:
+        try:
+            bot.polling(none_stop=True, timeout=30)
+        except Exception as e:
+            print(f"⚠️ Ошибка: {e}")
+            print("🔄 Перезапуск через 5 сек...")
+            time.sleep(5)
