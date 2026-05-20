@@ -852,16 +852,12 @@ def place_bet_direct(user_id, match_id, team, amount, chat_id):
 
 # ========== ЗАПУСК ==========
 if __name__ == '__main__':
-    print("STARTING EXTRABET...")
-    
-    # База данных
     init_db()
     
-    # Веб-сервер в потоке
-    threading.Thread(target=run_web_server, daemon=True).start()
+    # Flask в потоке
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=PORT), daemon=True).start()
     
     # Запуск бота
-    print("Bot polling started...")
     bot.remove_webhook()
-    time.sleep(1)
+    time.sleep(0.5)
     bot.infinity_polling()
