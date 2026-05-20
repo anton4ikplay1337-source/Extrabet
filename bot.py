@@ -99,6 +99,40 @@ def init_db():
     conn.commit()
     conn.close()
 
+# ========== АВТО-ЗАКРЫТИЕ МАТЧЕЙ ==========
+def auto_close_matches():
+    """Автоматически закрывает матчи, время которых прошло"""
+    print("🕐 Авто-закрытие матчей запущено")
+    time.sleep(30)  # Ждём 30 сек после старта
+    
+    while True:
+        try:
+            conn = sqlite3.connect('hockey_bets.db')
+            c = conn.cursor()
+            
+            # Текущее время
+            now = datetime.now().strftime("%d.%m.%Y %H:%M")
+            
+            # Находим матчи, которые пора закрыть
+            c.execute("""
+                UPDATE matches 
+                SET status='closed' 
+                WHERE status='upcoming' 
+                AND match_date <= ?
+            """, (now,))
+            
+            closed = c.rowcount
+            if closed > 0:
+                print(f"🔒 Закрыто матчей: {closed} (время: {now})")
+            
+            conn.commit()
+            conn.close()
+            
+        except Exception as e:
+            print(f"⚠️ Ошибка авто-закрытия: {e}")
+        
+        time.sleep(60)  # Проверяем каждую минуту
+
 # ========== ГЕНЕРАЦИЯ КОДА ==========
 def generate_promo_code(length=8):
     chars = string.ascii_uppercase + string.digits
@@ -215,15 +249,25 @@ def admin_matches_keyboard():
 def matches_keyboard():
     conn = sqlite3.connect('hockey_bets.db')
     c = conn.cursor()
-    c.execute("SELECT match_id, team1, team2, match_date, coefficient1, coefficient2, coefficient_draw FROM matches WHERE status='upcoming'")
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    # Только upcoming И время ещё не прошло
+    c.execute("""
+        SELECT match_id, team1, team2, match_date, coefficient1, coefficient2, coefficient_draw 
+        FROM matches 
+        WHERE status='upcoming' AND match_date > ?
+    """, (now,))
     matches = c.fetchall()
     conn.close()
+    
     kb = types.InlineKeyboardMarkup(row_width=1)
-    for match in matches:
-        kb.add(types.InlineKeyboardButton(
-            f"⚔ {match[1]} (x{match[4]}) vs {match[2]} (x{match[5]}) | Ничья (x{match[6]}) | {match[3]}",
-            callback_data=f"match_{match[0]}"
-        ))
+    if matches:
+        for match in matches:
+            kb.add(types.InlineKeyboardButton(
+                f"⚔ {match[1]} (x{match[4]}) vs {match[2]} (x{match[5]}) | Ничья (x{match[6]}) | {match[3]}",
+                callback_data=f"match_{match[0]}"
+            ))
+    else:
+        kb.add(types.InlineKeyboardButton("❌ Нет доступных матчей", callback_data="none"))
     kb.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="refresh_matches"))
     kb.add(types.InlineKeyboardButton("🔙 Назад", callback_data="back_main"))
     return kb
@@ -463,8 +507,10 @@ def bot_stats(message):
     total_users = c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM matches WHERE status='upcoming'")
     active_matches = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM matches WHERE status='closed'")
+    closed_matches = c.fetchone()[0]
     conn.close()
-    safe_send_message(message.chat.id, f"📊 Статистика\n👥 Пользователей: {total_users}\n🏒 Матчей: {active_matches}")
+    safe_send_message(message.chat.id, f"📊 Статистика\n👥 Пользователей: {total_users}\n🏒 Активных: {active_matches}\n🔒 Закрыто: {closed_matches}")
 
 @bot.message_handler(func=lambda m: m.text == "👥 Пользователи")
 def users_list(message):
@@ -616,6 +662,9 @@ def callback_handler(call):
         except: pass
         safe_send_message(call.message.chat.id, "📋 Меню снизу:", main_keyboard(call.from_user.id))
     
+    elif call.data == "none":
+        bot.answer_callback_query(call.id, "Нет доступных матчей")
+    
     elif call.data.startswith("match_"):
         match_id = int(call.data.split("_")[1])
         conn = sqlite3.connect('hockey_bets.db')
@@ -656,15 +705,17 @@ def callback_handler(call):
         if freebet:
             conn = sqlite3.connect('hockey_bets.db')
             c = conn.cursor()
-            c.execute("SELECT match_id, team1, team2, match_date FROM matches WHERE status='upcoming'")
+            now = datetime.now().strftime("%d.%m.%Y %H:%M")
+            c.execute("SELECT match_id, team1, team2, match_date FROM matches WHERE status='upcoming' AND match_date > ?", (now,))
             matches = c.fetchall()
             conn.close()
             if matches:
                 kb = types.InlineKeyboardMarkup(row_width=1)
-                text = f"🎯 Выберите матч\n💰 Номинал: {freebet[0]}\n\n"
                 for match in matches:
                     kb.add(types.InlineKeyboardButton(f"⚔ {match[1]} vs {match[2]}", callback_data=f"freebet_match_{bet_id}_{match[0]}"))
-                safe_edit_message(text, call.message.chat.id, call.message.message_id, kb)
+                safe_edit_message(f"🎯 Выберите матч\n💰 Номинал: {freebet[0]}\n\n", call.message.chat.id, call.message.message_id, kb)
+            else:
+                bot.answer_callback_query(call.id, "❌ Нет матчей!")
     
     elif call.data.startswith("freebet_match_"):
         parts = call.data.split("_")
@@ -852,12 +903,19 @@ def place_bet_direct(user_id, match_id, team, amount, chat_id):
 
 # ========== ЗАПУСК ==========
 if __name__ == '__main__':
+    print("STARTING EXTRABET...")
+    
     init_db()
     
-    # Flask в потоке
-    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=PORT), daemon=True).start()
+    # Flask
+    threading.Thread(target=run_web_server, daemon=True).start()
     
-    # Запуск бота
+    # Авто-закрытие матчей
+    threading.Thread(target=auto_close_matches, daemon=True).start()
+    print("🕐 Авто-закрытие матчей включено (проверка каждую минуту)")
+    
+    # Бот
+    print("Bot starting...")
     bot.remove_webhook()
     time.sleep(0.5)
     bot.infinity_polling()
