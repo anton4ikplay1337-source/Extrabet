@@ -15,10 +15,6 @@ TOKEN = os.environ.get('TOKEN', '8965196111:AAFsNCnmRTVsAUsSIKkZiIDCCzB6HSe_-OQ'
 ADMIN_ID = int(os.environ.get('ADMIN_ID', '5706071030'))
 PORT = int(os.environ.get('PORT', 10000))
 
-print(f"🔑 Токен загружен: {'Да' if TOKEN else 'Нет'}")
-print(f"👑 Админ ID: {ADMIN_ID}")
-print(f"🌐 Порт: {PORT}")
-
 bot = telebot.TeleBot(TOKEN)
 
 # ========== ВЕБ-СЕРВЕР ==========
@@ -26,11 +22,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return jsonify({
-        "status": "online",
-        "bot": "EXTRABET",
-        "time": datetime.now().strftime("%H:%M:%S")
-    })
+    return jsonify({"status": "online", "bot": "EXTRABET"})
 
 @app.route('/ping')
 def ping():
@@ -41,21 +33,7 @@ def health():
     return jsonify({"status": "healthy"})
 
 def run_web_server():
-    print(f"🌐 Запуск веб-сервера на порту {PORT}...")
-    app.run(host='0.0.0.0', port=PORT, debug=False)
-
-# ========== САМО-ПИНГ ==========
-def self_ping():
-    time.sleep(60)
-    print("🔄 Само-пинг активирован")
-    while True:
-        try:
-            import requests
-            response = requests.get(f'http://localhost:{PORT}/ping', timeout=10)
-            print(f"✅ Само-пинг: {response.status_code}")
-        except Exception as e:
-            print(f"⚠️ Само-пинг ошибка: {e}")
-        time.sleep(600)
+    app.run(host='0.0.0.0', port=PORT)
 
 # ========== ВРЕМЕННЫЕ ХРАНИЛИЩА ==========
 user_match_creation = {}
@@ -63,7 +41,6 @@ user_bet_amount = {}
 
 # ========== БАЗА ДАННЫХ ==========
 def init_db():
-    print("📦 Инициализация базы данных...")
     conn = sqlite3.connect('hockey_bets.db')
     c = conn.cursor()
     
@@ -121,7 +98,6 @@ def init_db():
     
     conn.commit()
     conn.close()
-    print("✅ База данных готова")
 
 # ========== ГЕНЕРАЦИЯ КОДА ==========
 def generate_promo_code(length=8):
@@ -133,7 +109,7 @@ def safe_send_message(chat_id, text, reply_markup=None):
     try:
         return bot.send_message(chat_id, text, reply_markup=reply_markup)
     except Exception as e:
-        print(f"Ошибка отправки в {chat_id}: {e}")
+        print(f"Ошибка: {e}")
         time.sleep(1)
         try:
             return bot.send_message(chat_id, text, reply_markup=reply_markup)
@@ -143,8 +119,7 @@ def safe_send_message(chat_id, text, reply_markup=None):
 def safe_edit_message(text, chat_id, message_id, reply_markup=None):
     try:
         return bot.edit_message_text(text, chat_id, message_id, reply_markup=reply_markup)
-    except Exception as e:
-        print(f"Ошибка редактирования: {e}")
+    except:
         return None
 
 def get_photo(photo_type):
@@ -158,14 +133,14 @@ def get_photo(photo_type):
 def notify_user(user_id, match_info, team, amount, coefficient, bet_type, status, winnings=0):
     if status == "won":
         if bet_type in ('freebet', 'freebet_active'):
-            caption = f"🏆 ФРИБЕТ ВЫИГРАЛ!\n\n📊 {match_info}\n✅ Ваш прогноз: {team}\n💰 Сумма выигрыша: {amount} монет\n\nПоздравляем с победой!"
+            caption = f"🏆 ФРИБЕТ ВЫИГРАЛ!\n\n📊 {match_info}\n✅ Ваш прогноз: {team}\n💰 Выигрыш: {amount} монет\n\nПоздравляем!"
         else:
-            caption = f"🎉 СТАВКА СЫГРАЛА!\n\n📊 {match_info}\n✅ Ваш прогноз: {team}\n💵 Сумма ставки: {amount} монет\n📈 Коэффициент: x{coefficient}\n💰 ВЫИГРЫШ: {winnings} монет\n\nОтличный результат!"
+            caption = f"🎉 СТАВКА СЫГРАЛА!\n\n📊 {match_info}\n✅ Ваш прогноз: {team}\n💵 Ставка: {amount}\n📈 КФ: x{coefficient}\n💰 ВЫИГРЫШ: {winnings} монет\n\nОтличный результат!"
     else:
         if bet_type in ('freebet', 'freebet_active'):
-            caption = f"😞 ФРИБЕТ ПРОИГРАЛ\n\n📊 {match_info}\n❌ Ваш прогноз: {team}\n💰 Сумма: {amount} монет\n\nНе повезло, но ты справишься!"
+            caption = f"😞 ФРИБЕТ ПРОИГРАЛ\n\n📊 {match_info}\n❌ Ваш прогноз: {team}\n💰 Сумма: {amount}\n\nНе повезло!"
         else:
-            caption = f"💔 СТАВКА ПРОИГРАЛА\n\n📊 {match_info}\n❌ Ваш прогноз: {team}\n💵 Сумма ставки: {amount} монет\n📈 Коэффициент: x{coefficient}\n\nВ следующий раз повезёт больше!"
+            caption = f"💔 СТАВКА ПРОИГРАЛА\n\n📊 {match_info}\n❌ Ваш прогноз: {team}\n💵 Ставка: {amount}\n📈 КФ: x{coefficient}\n\nВ следующий раз повезёт!"
     
     photo_sent = False
     if status == "won":
@@ -296,7 +271,6 @@ def start(message):
     c.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (user_id, username))
     conn.commit()
     conn.close()
-    print(f"👤 Новый пользователь: {username} (ID: {user_id})")
     welcome_text = "🏒 ДОБРО ПОЖАЛОВАТЬ В EXTRABET!\n\n💰 Ваш стартовый баланс: 1000 монет\n\n📋 Меню находится снизу"
     if user_id == ADMIN_ID:
         safe_send_message(message.chat.id, welcome_text, admin_keyboard())
@@ -691,8 +665,6 @@ def callback_handler(call):
                 for match in matches:
                     kb.add(types.InlineKeyboardButton(f"⚔ {match[1]} vs {match[2]}", callback_data=f"freebet_match_{bet_id}_{match[0]}"))
                 safe_edit_message(text, call.message.chat.id, call.message.message_id, kb)
-            else:
-                bot.answer_callback_query(call.id, "❌ Нет матчей!")
     
     elif call.data.startswith("freebet_match_"):
         parts = call.data.split("_")
@@ -880,30 +852,16 @@ def place_bet_direct(user_id, match_id, team, amount, chat_id):
 
 # ========== ЗАПУСК ==========
 if __name__ == '__main__':
-    print("=" * 50)
-    print("🏒 EXTRABET ЗАПУСКАЕТСЯ...")
-    print("=" * 50)
+    print("STARTING EXTRABET...")
     
     # База данных
     init_db()
     
-    # Веб-сервер
-    web_thread = threading.Thread(target=run_web_server, daemon=True)
-    web_thread.start()
-    print(f"🌐 Веб-сервер на порту {PORT}")
-    
-    # Само-пинг
-    ping_thread = threading.Thread(target=self_ping, daemon=True)
-    ping_thread.start()
+    # Веб-сервер в потоке
+    threading.Thread(target=run_web_server, daemon=True).start()
     
     # Запуск бота
-    print("🤖 Бот запущен! Жду сообщения...")
-    print("=" * 50)
-    
-    while True:
-        try:
-            bot.polling(none_stop=True, timeout=30)
-        except Exception as e:
-            print(f"⚠️ Ошибка: {e}")
-            print("🔄 Перезапуск через 5 сек...")
-            time.sleep(5)
+    print("Bot polling started...")
+    bot.remove_webhook()
+    time.sleep(1)
+    bot.infinity_polling()
