@@ -11,7 +11,7 @@ from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ========== НАСТРОЙКИ ==========
-TOKEN = "8965196111:AAFsNCnmRTVsAUsSIKkZiIDCCzB6HSe_-OQ"
+TOKEN = "8965196111:AAEXbplXNwdq_AbYZFFAu-H-fRLsGbxUK_o"
 ADMIN_ID = 5706071030
 bot = telebot.TeleBot(TOKEN)
 
