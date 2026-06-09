@@ -7,14 +7,11 @@ import string
 import re
 import os
 import time
-from flask import Flask, request
-import threading
 
 # ========== НАСТРОЙКИ ==========
 TOKEN = "8657731994:AAFgwuJbbd2fqvtXUqapczb9Y1I1ajW-FDM"
 ADMIN_ID = 5706071030
 bot = telebot.TeleBot(TOKEN)
-app = Flask(__name__)
 
 # ========== ФУНКЦИИ БАЗЫ ДАННЫХ ==========
 def msk_now():
@@ -40,14 +37,11 @@ def init_db():
     conn.commit()
     conn.close()
 
-def generate_promo_code(length=8):
-    return ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(length))
-
 def safe_send(chat_id, text, reply_markup=None):
     try: 
         return bot.send_message(chat_id, text, reply_markup=reply_markup)
     except Exception as e:
-        print(f"Ошибка safe_send: {e}")
+        print(f"Ошибка: {e}")
         return None
 
 def get_photo(t):
@@ -223,7 +217,7 @@ def profile(message):
     u = c.fetchone()
     conn.close()
     if u:
-        wr = (u[5]/u[4]*100) if u[4]>0 else 0
+        wr = (u[5]/u[4]*100) if u[4] > 0 else 0
         safe_send(message.chat.id, f"👤 {u[1]}\n💰 {u[2]} тенге\n🎁 Фрибеты: {u[3]}\n📊 Ставок: {u[4]}\n✅ Побед: {u[5]} ({wr:.1f}%)")
 
 @bot.message_handler(func=lambda m: m.text == "💰 БАЛАНС")
@@ -235,20 +229,6 @@ def balance(message):
     d = c.fetchone()
     conn.close()
     safe_send(message.chat.id, f"💰 Баланс: {d[0]} тенге\n🎁 Фрибетов: {d[1]}")
-
-@bot.message_handler(func=lambda m: m.text == "📊 ИСТОРИЯ")
-def history(message):
-    uid = message.from_user.id
-    conn = sqlite3.connect('hockey_bets.db')
-    c = conn.cursor()
-    c.execute("SELECT b.team, b.amount, b.status, m.team1, m.team2, b.bet_time FROM bets b JOIN matches m ON b.match_id=m.match_id WHERE b.user_id=? ORDER BY b.bet_id DESC LIMIT 5", (uid,))
-    bets = c.fetchall()
-    conn.close()
-    txt = "📊 ИСТОРИЯ:\n\n" if bets else "Нет ставок"
-    for b in bets:
-        em = "✅" if b[2]=="won" else "❌" if b[2]=="lost" else "⏳"
-        txt += f"{em} {b[3]} vs {b[4]}: {b[1]} тенге на {b[0]} | {b[5]}\n"
-    safe_send(message.chat.id, txt)
 
 @bot.message_handler(func=lambda m: m.text == "🎁 ЕЖЕДНЕВНЫЙ БОНУС")
 def daily_bonus(message):
@@ -282,17 +262,17 @@ def process_promo(message):
     c.execute("SELECT * FROM promocodes WHERE code=? AND is_active=1", (code,))
     p = c.fetchone()
     if not p: 
-        safe_send(message.chat.id, "❌ Промокод не найден!"); 
-        conn.close(); 
+        safe_send(message.chat.id, "❌ Промокод не найден!")
+        conn.close()
         return
     if p[3] <= p[4]: 
-        safe_send(message.chat.id, "❌ Лимит использований исчерпан!"); 
-        conn.close(); 
+        safe_send(message.chat.id, "❌ Лимит использований!")
+        conn.close()
         return
     c.execute("SELECT id FROM used_promos WHERE user_id=? AND promo_code=?", (uid, code))
     if c.fetchone(): 
-        safe_send(message.chat.id, "❌ Вы уже использовали этот промокод!"); 
-        conn.close(); 
+        safe_send(message.chat.id, "❌ Уже использован!")
+        conn.close()
         return
     
     c.execute("INSERT INTO used_promos (user_id, promo_code, used_date) VALUES (?,?,?)", (uid, code, msk_now().strftime("%d.%m.%Y %H:%M")))
@@ -313,16 +293,12 @@ def show_freebets(message):
     uid = message.from_user.id
     conn = sqlite3.connect('hockey_bets.db')
     c = conn.cursor()
-    
     c.execute("SELECT freebets FROM users WHERE user_id=?", (uid,))
     user_freebet_count = c.fetchone()[0]
-    
     c.execute("SELECT bet_id, amount, status FROM bets WHERE user_id=? AND bet_type='freebet' ORDER BY bet_id DESC", (uid,))
     all_freebets = c.fetchall()
     conn.close()
-    
     available_freebets = [fb for fb in all_freebets if fb[2] == 'pending']
-    
     if available_freebets:
         kb = types.InlineKeyboardMarkup(row_width=1)
         for fb in available_freebets: 
@@ -330,8 +306,7 @@ def show_freebets(message):
         safe_send(message.chat.id, f"🎁 Ваши фрибеты (доступно: {len(available_freebets)}):", kb)
     else:
         if user_freebet_count > 0:
-            safe_send(message.chat.id, f"⚠️ У вас есть {user_freebet_count} фрибет(ов) в счетчике, но они отсутствуют в системе. Исправляем...")
-            
+            safe_send(message.chat.id, "⚠️ Фрибеты восстанавливаются...")
             conn = sqlite3.connect('hockey_bets.db')
             c = conn.cursor()
             needed = user_freebet_count - len(available_freebets)
@@ -342,10 +317,9 @@ def show_freebets(message):
                     (uid, uid, amount, msk_now().strftime("%d.%m.%Y %H:%M")))
             conn.commit()
             conn.close()
-            
             show_freebets(message)
         else:
-            safe_send(message.chat.id, "🎁 У вас нет фрибетов. Выполняйте квесты или активируйте промокоды!")
+            safe_send(message.chat.id, "🎁 У вас нет фрибетов.")
 
 @bot.message_handler(func=lambda m: m.text == "📋 КВЕСТЫ")
 def show_quests(message):
@@ -353,22 +327,18 @@ def show_quests(message):
     today = msk_now().strftime("%d.%m.%Y")
     conn = sqlite3.connect('hockey_bets.db')
     c = conn.cursor()
-    
     c.execute("SELECT COUNT(*) FROM bets WHERE user_id=? AND bet_time LIKE ?", (uid, today+'%'))
     total_bets = c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM bets WHERE user_id=? AND status='won' AND bet_time LIKE ?", (uid, today+'%'))
     total_wins = c.fetchone()[0]
-    
     c.execute("SELECT quest_claimed FROM users WHERE user_id=?", (uid,))
     result = c.fetchone()
     claimed_str = result[0] if result and result[0] else ''
     claimed = claimed_str.split(',') if claimed_str else []
-    
     c.execute("SELECT quest_id, description, quest_type, target, freebet_amount FROM quests WHERE is_active=1")
     quests = c.fetchall()
     conn.close()
-    
-    txt = f"📋 КВЕСТЫ\n📊 Ставок сегодня: {total_bets}\n✅ Побед сегодня: {total_wins}\n\n"
+    txt = f"📋 КВЕСТЫ\n📊 Ставок: {total_bets}\n✅ Побед: {total_wins}\n\n"
     if quests:
         for q in quests:
             qid, desc, qtype, target, fb_amt = q
@@ -378,7 +348,7 @@ def show_quests(message):
                 current = total_bets if qtype == 'bets' else total_wins
                 txt += f"🟡 #{qid}: {desc}\n🎯 {current}/{target}\n🎁 1 фрибет на {fb_amt} тенге\n\n"
     else:
-        txt += "Пока нет активных квестов"
+        txt += "Нет активных квестов"
     safe_send(message.chat.id, txt)
 
 @bot.message_handler(func=lambda m: m.text == "🏆 ТОП-10")
@@ -388,9 +358,9 @@ def top10(message):
     c.execute("SELECT username, balance FROM users ORDER BY balance DESC LIMIT 10")
     users = c.fetchall()
     conn.close()
-    txt = "🏆 ТОП-10 БОГАТЕЙШИХ:\n\n" if users else "Пусто"
+    txt = "🏆 ТОП-10:\n\n" if users else "Пусто"
     for i, u in enumerate(users, 1):
-        medal = "🥇" if i==1 else "🥈" if i==2 else "🥉" if i==3 else f"{i}."
+        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
         txt += f"{medal} {u[0]}: 💰{u[1]} тенге\n"
     safe_send(message.chat.id, txt)
 
@@ -403,15 +373,14 @@ def admin_menu(message):
 def menu(message):
     uid = message.from_user.id
     if uid == ADMIN_ID:
-        safe_send(message.chat.id, "📋 Главное меню", admin_keyboard())
+        safe_send(message.chat.id, "📋 Меню", admin_keyboard())
     else:
-        safe_send(message.chat.id, "📋 Главное меню", main_keyboard(uid))
+        safe_send(message.chat.id, "📋 Меню", main_keyboard(uid))
 
-# ========== АДМИН-ФУНКЦИИ ==========
 @bot.message_handler(func=lambda m: m.text == "➕ МАТЧ")
 def add_match(message):
     if message.from_user.id != ADMIN_ID: return
-    msg = safe_send(message.chat.id, "➕ Формат: ЛИГА | Команда1 vs Команда2 | ДД.ММ.ГГГГ ЧЧ:ММ | П1 П2 Н П1ОТ П2ОТ Тотал ТБ ТМ\n\nПример: БХМ | Салават Юлаев vs Ак Барс | 25.12.2024 19:00 | 2.3 2.3 3.5 3.5 3.5 5.5 1.9 1.9")
+    msg = safe_send(message.chat.id, "➕ ЛИГА | Команда1 vs Команда2 | ДД.ММ.ГГГГ ЧЧ:ММ | П1 П2 Н П1ОТ П2ОТ Тотал ТБ ТМ")
     bot.register_next_step_handler(msg, add_match_step2)
 
 def add_match_step2(message):
@@ -431,8 +400,41 @@ def add_match_step2(message):
             c.execute("INSERT INTO matches (league,team1,team2,match_date) VALUES (?,?,?,?)", (l, t1.strip(), t2.strip(), d))
         conn.commit()
         conn.close()
-        safe_send(message.chat.id, f"✅ Матч добавлен!\n{l}\n⚔ {t1} vs {t2}\n📅 {d}")
+        safe_send(message.chat.id, f"✅ Матч добавлен!")
     except Exception as e:
-        safe_send(message.chat.id, f"❌ Ошибка! {str(e)}")
+        safe_send(message.chat.id, f"❌ Ошибка: {e}")
 
-@bot.message_handler(func=lambda m: m.text ==
+@bot.message_handler(func=lambda m: m.text == "📋 МАТЧИ")
+def admin_matches(message):
+    if message.from_user.id != ADMIN_ID: return
+    conn = sqlite3.connect('hockey_bets.db')
+    c = conn.cursor()
+    c.execute("SELECT match_id, league, team1, team2, match_date, status FROM matches ORDER BY match_date DESC LIMIT 20")
+    ms = c.fetchall()
+    conn.close()
+    txt = "📋 МАТЧИ:\n\n" if ms else "Нет матчей"
+    for m in ms:
+        s = "🟢" if m[5] == 'upcoming' else "🔴"
+        txt += f"{s} #{m[0]}: {m[2]} vs {m[3]} ({m[1]}) | {m[4]}\n"
+    safe_send(message.chat.id, txt)
+
+@bot.message_handler(func=lambda m: m.text == "🏆 РЕЗУЛЬТАТ")
+def set_result_start(message):
+    if message.from_user.id != ADMIN_ID: return
+    conn = sqlite3.connect('hockey_bets.db')
+    c = conn.cursor()
+    c.execute("SELECT match_id, team1, team2 FROM matches WHERE status='upcoming'")
+    ms = c.fetchall()
+    conn.close()
+    if ms:
+        kb = types.InlineKeyboardMarkup(row_width=1)
+        for m in ms:
+            kb.add(types.InlineKeyboardButton(f"#{m[0]} {m[1]} vs {m[2]}", callback_data=f"setres_{m[0]}"))
+        safe_send(message.chat.id, "🏆 Выберите матч:", kb)
+    else:
+        safe_send(message.chat.id, "Нет матчей")
+
+@bot.message_handler(func=lambda m: m.text == "👁 СТАВКИ")
+def view_bets(message):
+    if message.from_user.id != ADMIN_ID: return
+    
