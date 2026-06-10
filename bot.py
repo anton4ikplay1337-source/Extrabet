@@ -1241,31 +1241,34 @@ def process_custom(message, mid, team):
     except:
         safe_send(message.chat.id, "❌ Ошибка!")
 
-# ========== FLASK ДЛЯ HEALTH-CHECK (ЧТОБЫ БОТ НЕ ЗАСЫПАЛ) ==========
+# ========== FLASK ДЛЯ HEALTH-CHECK ==========
 @app.route('/')
 @app.route('/health')
 def health():
     return "Bot is alive!", 200
 
-def run_flask():
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
-
-# ========== ЗАПУСК ==========
-if __name__ == '__main__':
-    print("🏒 EXTRABOT ЗАПУЩЕН НА RENDER (24/7)!")
-    print("✅ Health-check сервер запущен")
+# ========== ЗАПУСК БОТА В ПОТОКЕ ==========
+def run_bot():
+    """Запускает бота в бесконечном цикле с автоматическим переподключением"""
+    print("🤖 Запускаем бота...")
     init_db()
-    
-    # Запускаем Flask в отдельном потоке
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
-    
-    # Запускаем бота
     while True:
         try:
             bot.infinity_polling(timeout=60, long_polling_timeout=60)
         except Exception as e:
-            print(f"❌ Ошибка: {e}")
+            print(f"❌ Ошибка бота: {e}")
             print("🔄 Переподключение через 15 секунд...")
             time.sleep(15)
+
+# ========== ТОЧКА ВХОДА ==========
+print("🏒 Инициализация EXTRABOT...")
+print("🚀 Запускаем бота в фоновом потоке...")
+
+# Запускаем бота в отдельном потоке (daemon=True чтобы поток закрывался вместе с main)
+bot_thread = threading.Thread(target=run_bot, daemon=True)
+bot_thread.start()
+
+print("✅ Бот запущен! Flask сервер готов к приёму запросов.")
+print("📊 UptimeRobot должен пинговать /health для 24/7 работы")
+
+# Flask приложение (app) будет запущено gunicorn'ом
