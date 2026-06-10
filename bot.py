@@ -1247,28 +1247,33 @@ def process_custom(message, mid, team):
 def health():
     return "Bot is alive!", 200
 
-# ========== ЗАПУСК БОТА В ПОТОКЕ ==========
-def run_bot():
-    """Запускает бота в бесконечном цикле с автоматическим переподключением"""
-    print("🤖 Запускаем бота...")
+# ========== ЗАПУСК ==========
+if __name__ == '__main__':
+    print("🏒 EXTRABOT ЗАПУЩЕН!")
+    print("🚀 Запускаем бота в фоновом потоке...")
+    
+    # Инициализируем базу
     init_db()
-    while True:
-        try:
-            bot.infinity_polling(timeout=60, long_polling_timeout=60)
-        except Exception as e:
-            print(f"❌ Ошибка бота: {e}")
-            print("🔄 Переподключение через 15 секунд...")
-            time.sleep(15)
-
-# ========== ТОЧКА ВХОДА ==========
-print("🏒 Инициализация EXTRABOT...")
-print("🚀 Запускаем бота в фоновом потоке...")
-
-# Запускаем бота в отдельном потоке (daemon=True чтобы поток закрывался вместе с main)
-bot_thread = threading.Thread(target=run_bot, daemon=True)
-bot_thread.start()
-
-print("✅ Бот запущен! Flask сервер готов к приёму запросов.")
-print("📊 UptimeRobot должен пинговать /health для 24/7 работы")
-
-# Flask приложение (app) будет запущено gunicorn'ом
+    
+    # Функция для запуска бота с автоматическим переподключением
+    def run_bot():
+        print("🤖 Бот запущен и ждет команды...")
+        while True:
+            try:
+                bot.remove_webhook()  # Удаляем webhook перед стартом (избегаем 409 ошибки)
+                time.sleep(1)
+                bot.infinity_polling(timeout=60, long_polling_timeout=60)
+            except Exception as e:
+                print(f"❌ Ошибка бота: {e}")
+                print("🔄 Переподключение через 15 секунд...")
+                time.sleep(15)
+    
+    # Запускаем бота в отдельном потоке
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    
+    print("✅ Бот запущен! Flask сервер на порту 8080")
+    print("📊 UptimeRobot должен пинговать /health для 24/7 работы")
+    
+    # Запускаем Flask (блокирующий вызов - остается в главном потоке)
+    app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
