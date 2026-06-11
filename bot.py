@@ -11,7 +11,7 @@ from flask import Flask
 import threading
 
 # ========== НАСТРОЙКИ ==========
-TOKEN = "8657731994:AAFgwuJbbd2fqvtXUqapczb9Y1I1ajW-FDM"
+TOKEN = "8965196111:AAFl4SuSL7OlUzLcMWJoWWoXA4d01xX_qwU"
 ADMIN_ID = 5706071030
 bot = telebot.TeleBot(TOKEN)
 
