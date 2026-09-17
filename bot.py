@@ -9,36 +9,42 @@ import os
 import time
 from flask import Flask
 import threading
-import signal
-import sys
 
 # ========== НАСТРОЙКИ ==========
-TOKEN = "8965196111:AAFl4SuSL7OlUzLcMWJoWWoXA4d01xX_qwU"
+TOKEN = "8965196111:AAHSb1OTw3cGtcf8u3XJDfvM_0Z5NeY1X2Q"
 ADMIN_ID = 5706071030
+LEAGUE = "БХМ"  # Единственная лига для ставок
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
-# ========== ПРИНУДИТЕЛЬНО УДАЛЯЕМ WEBHOOK И ОЧИЩАЕМ ОБНОВЛЕНИЯ ==========
+# ========== ВРЕМЯ ПО МСК ==========
+def msk_now():
+    """Текущее время по МСК (UTC+3)"""
+    return datetime.utcnow() + timedelta(hours=3)
+
+def msk_str():
+    """Строка текущего времени МСК"""
+    return msk_now().strftime("%d.%m.%Y %H:%M")
+
+def is_match_started(match_date_str):
+    """Проверяет, начался ли матч (по МСК)"""
+    try:
+        match_dt = datetime.strptime(match_date_str, "%d.%m.%Y %H:%M")
+        return msk_now() >= match_dt
+    except:
+        return False
+
+# ========== УДАЛЯЕМ WEBHOOK ==========
 print("🔄 Удаляем старый webhook...")
 try:
     bot.remove_webhook()
     print("✅ Webhook удалён")
 except Exception as e:
-    print(f"❌ Ошибка удаления webhook: {e}")
+    print(f"❌ Ошибка: {e}")
 
 time.sleep(1)
 
-print("🔄 Очищаем старые обновления...")
-try:
-    updates = bot.get_updates(offset=-1, timeout=1)
-    print(f"✅ Очищено {len(updates)} обновлений")
-except Exception as e:
-    print(f"❌ Ошибка очистки: {e}")
-
-# ========== ФУНКЦИИ БАЗЫ ДАННЫХ ==========
-def msk_now():
-    return datetime.now() + timedelta(hours=3)
-
+# ========== БАЗА ДАННЫХ ==========
 def init_db():
     conn = sqlite3.connect('hockey_bets.db')
     c = conn.cursor()
@@ -54,8 +60,7 @@ def init_db():
     c.execute("SELECT COUNT(*) FROM quests")
     if c.fetchone()[0] == 0:
         c.execute("INSERT INTO quests (description, quest_type, target, freebet_amount, duration_hours, is_active, created_date) VALUES (?,?,?,?,?,?,?)",
-                  ("Сделай 1 ставку", "bets", 1, 500, 24, 1, msk_now().strftime("%d.%m.%Y %H:%M")))
-    
+                  ("Сделай 1 ставку", "bets", 1, 500, 24, 1, msk_str()))
     conn.commit()
     conn.close()
 
@@ -83,47 +88,32 @@ def check_and_claim_quests(user_id):
     c = conn.cursor()
     today = msk_now().strftime("%d.%m.%Y")
     rewards = []
-    
     c.execute("SELECT COUNT(*) FROM bets WHERE user_id=? AND bet_time LIKE ?", (user_id, today+'%'))
     total_bets = c.fetchone()[0]
-    
     c.execute("SELECT COUNT(*) FROM bets WHERE user_id=? AND status='won' AND bet_time LIKE ?", (user_id, today+'%'))
     total_wins = c.fetchone()[0]
-    
     c.execute("SELECT quest_claimed FROM users WHERE user_id=?", (user_id,))
     result = c.fetchone()
     claimed_str = result[0] if result and result[0] else ''
     claimed = claimed_str.split(',') if claimed_str else []
-    
     c.execute("SELECT quest_id, quest_type, target, freebet_amount, description FROM quests WHERE is_active=1")
     quests = c.fetchall()
-    
     new_claimed = []
-    
     for q in quests:
         qid, qtype, target, fb_amt, desc = q
         if str(qid) in claimed:
             continue
-        
-        if qtype == 'bets':
-            current = total_bets
-        elif qtype == 'wins':
-            current = total_wins
-        else:
-            continue
-        
+        current = total_bets if qtype == 'bets' else total_wins if qtype == 'wins' else 0
         if current >= target:
             c.execute("UPDATE users SET freebets=freebets+1 WHERE user_id=?", (user_id,))
             c.execute("""INSERT INTO bets (user_id, username, match_id, team, amount, coefficient, bet_type, status, bet_time) 
                          VALUES (?, (SELECT username FROM users WHERE user_id=?), 0, 'ФРИБЕТ КВЕСТА', ?, 1.0, 'freebet', 'pending', ?)""",
-                (user_id, user_id, fb_amt, msk_now().strftime("%d.%m.%Y %H:%M")))
+                (user_id, user_id, fb_amt, msk_str()))
             new_claimed.append(str(qid))
-            rewards.append(f"📋 {desc}: +1 фрибет на {fb_amt} тенге")
-    
+            rewards.append(f"📋 {desc}: +1 фрибет на {fb_amt} экстракойнов")
     if new_claimed:
         all_claimed = claimed + new_claimed
         c.execute("UPDATE users SET quest_claimed=? WHERE user_id=?", (','.join(all_claimed), user_id))
-    
     conn.commit()
     conn.close()
     return rewards
@@ -150,27 +140,21 @@ def admin_keyboard():
     kb.add("📋 КВЕСТ", "📋 МЕНЮ")
     return kb
 
-def league_keyboard():
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(types.InlineKeyboardButton("🏒 БХМ", callback_data="league_БХМ"))
-    kb.add(types.InlineKeyboardButton("🏒 МХМ", callback_data="league_МХМ"))
-    kb.add(types.InlineKeyboardButton("🏒 КХМ", callback_data="league_КХМ"))
-    return kb
-
-def matches_keyboard(league):
+def matches_keyboard():
+    """Матчи БХМ (только ещё не начавшиеся)"""
     conn = sqlite3.connect('hockey_bets.db')
     c = conn.cursor()
-    c.execute("SELECT match_id, team1, team2, match_date FROM matches WHERE league=? AND status='upcoming' ORDER BY match_date", (league,))
-    matches = c.fetchall()
+    c.execute("SELECT match_id, team1, team2, match_date FROM matches WHERE league=? AND status='upcoming' ORDER BY match_date", (LEAGUE,))
+    all_matches = c.fetchall()
     conn.close()
     kb = types.InlineKeyboardMarkup(row_width=1)
-    if not matches:
-        kb.add(types.InlineKeyboardButton("❌ Нет матчей", callback_data="none"))
+    available = [m for m in all_matches if not is_match_started(m[3])]
+    if not available:
+        kb.add(types.InlineKeyboardButton("❌ Нет доступных матчей", callback_data="none"))
     else:
-        for m in matches:
-            kb.add(types.InlineKeyboardButton(f"⚔ {m[1]} vs {m[2]} | {m[3]}", callback_data=f"match_{m[0]}"))
-    kb.add(types.InlineKeyboardButton("🔄 Обновить", callback_data=f"refresh_{league}"))
-    kb.add(types.InlineKeyboardButton("🔙 К лигам", callback_data="back_to_leagues"))
+        for m in available:
+            kb.add(types.InlineKeyboardButton(f"⚔ {m[1]} vs {m[2]} | {m[3]} МСК", callback_data=f"match_{m[0]}"))
+    kb.add(types.InlineKeyboardButton("🔄 Обновить", callback_data="refresh_matches"))
     return kb
 
 def bet_keyboard(mid):
@@ -210,13 +194,14 @@ def start(message):
     conn.commit()
     conn.close()
     if uid == ADMIN_ID:
-        safe_send(message.chat.id, "🏒 EXTRABET\n💰 1000 тенге", admin_keyboard())
+        safe_send(message.chat.id, "🏒 EXTRABET\n💰 1000 экстракойнов", admin_keyboard())
     else:
-        safe_send(message.chat.id, "🏒 EXTRABET\n💰 1000 тенге", main_keyboard(uid))
+        safe_send(message.chat.id, "🏒 EXTRABET\n💰 1000 экстракойнов", main_keyboard(uid))
 
 @bot.message_handler(func=lambda m: m.text == "🏒 СТАВКИ")
-def show_leagues(message):
-    safe_send(message.chat.id, "🏒 ВЫБЕРИТЕ ЛИГУ:", league_keyboard())
+def show_matches(message):
+    """Показывает матчи БХМ"""
+    safe_send(message.chat.id, f"🏒 ЛИГА {LEAGUE}\n\nВыберите матч:", matches_keyboard())
 
 @bot.message_handler(func=lambda m: m.text == "🏆 КУБОК")
 def show_cup(message):
@@ -243,7 +228,7 @@ def profile(message):
     conn.close()
     if u:
         wr = (u[5]/u[4]*100) if u[4] > 0 else 0
-        safe_send(message.chat.id, f"👤 {u[1]}\n💰 {u[2]} тенге\n🎁 Фрибеты: {u[3]}\n📊 Ставок: {u[4]}\n✅ Побед: {u[5]} ({wr:.1f}%)")
+        safe_send(message.chat.id, f"👤 {u[1]}\n💰 {u[2]} экстракойнов\n🎁 Фрибеты: {u[3]}\n📊 Ставок: {u[4]}\n✅ Побед: {u[5]} ({wr:.1f}%)")
 
 @bot.message_handler(func=lambda m: m.text == "💰 БАЛАНС")
 def balance(message):
@@ -253,20 +238,21 @@ def balance(message):
     c.execute("SELECT balance, freebets FROM users WHERE user_id=?", (uid,))
     d = c.fetchone()
     conn.close()
-    safe_send(message.chat.id, f"💰 Баланс: {d[0]} тенге\n🎁 Фрибетов: {d[1]}")
+    safe_send(message.chat.id, f"💰 Баланс: {d[0]} экстракойнов\n🎁 Фрибетов: {d[1]}")
 
 @bot.message_handler(func=lambda m: m.text == "📊 ИСТОРИЯ")
 def history(message):
     uid = message.from_user.id
     conn = sqlite3.connect('hockey_bets.db')
     c = conn.cursor()
-    c.execute("SELECT b.team, b.amount, b.status, m.team1, m.team2, b.bet_time FROM bets b JOIN matches m ON b.match_id=m.match_id WHERE b.user_id=? ORDER BY b.bet_id DESC LIMIT 5", (uid,))
+    c.execute("SELECT b.team, b.amount, b.status, m.team1, m.team2, b.bet_time FROM bets b LEFT JOIN matches m ON b.match_id=m.match_id WHERE b.user_id=? ORDER BY b.bet_id DESC LIMIT 5", (uid,))
     bets = c.fetchall()
     conn.close()
     txt = "📊 ИСТОРИЯ:\n\n" if bets else "Нет ставок"
     for b in bets:
         em = "✅" if b[2]=="won" else "❌" if b[2]=="lost" else "⏳"
-        txt += f"{em} {b[3]} vs {b[4]}: {b[1]} тенге на {b[0]} | {b[5]}\n"
+        match_name = f"{b[3]} vs {b[4]}" if b[3] else "—"
+        txt += f"{em} {match_name}: {b[1]} экстракойнов на {b[0]} | {b[5]}\n"
     safe_send(message.chat.id, txt)
 
 @bot.message_handler(func=lambda m: m.text == "🎁 ЕЖЕДНЕВНЫЙ БОНУС")
@@ -286,7 +272,7 @@ def daily_bonus(message):
     c.execute("UPDATE users SET balance=balance+?, daily_bonus_date=? WHERE user_id=?", (bonus, today, uid))
     conn.commit()
     conn.close()
-    safe_send(message.chat.id, f"🎁 +{bonus} тенге!" if bonus > 0 else "😢 0 тенге")
+    safe_send(message.chat.id, f"🎁 +{bonus} экстракойнов!" if bonus > 0 else "😢 0 экстракойнов")
 
 @bot.message_handler(func=lambda m: m.text == "🎫 ПРОМОКОД")
 def promo_activate(message):
@@ -313,19 +299,17 @@ def process_promo(message):
         safe_send(message.chat.id, "❌ Уже использован!")
         conn.close()
         return
-    
-    c.execute("INSERT INTO used_promos (user_id, promo_code, used_date) VALUES (?,?,?)", (uid, code, msk_now().strftime("%d.%m.%Y %H:%M")))
+    c.execute("INSERT INTO used_promos (user_id, promo_code, used_date) VALUES (?,?,?)", (uid, code, msk_str()))
     c.execute("UPDATE promocodes SET used_count=used_count+1 WHERE code=?", (code,))
     c.execute("UPDATE users SET freebets=freebets+1 WHERE user_id=?", (uid,))
     c.execute("""INSERT INTO bets (user_id, username, match_id, team, amount, coefficient, bet_type, status, bet_time) 
                  VALUES (?, (SELECT username FROM users WHERE user_id=?), 0, 'ФРИБЕТ ПРОМОКОДА', ?, 1.0, 'freebet', 'pending', ?)""",
-        (uid, uid, p[2], msk_now().strftime("%d.%m.%Y %H:%M")))
-    
+        (uid, uid, p[2], msk_str()))
     if p[4]+1 >= p[3]: 
         c.execute("UPDATE promocodes SET is_active=0 WHERE code=?", (code,))
     conn.commit()
     conn.close()
-    safe_send(message.chat.id, f"🎁 Промокод активирован! +1 фрибет на {p[2]} тенге!")
+    safe_send(message.chat.id, f"🎁 Промокод активирован! +1 фрибет на {p[2]} экстракойнов!")
 
 @bot.message_handler(func=lambda m: m.text == "🎁 ФРИБЕТЫ")
 def show_freebets(message):
@@ -344,21 +328,7 @@ def show_freebets(message):
             kb.add(types.InlineKeyboardButton(f"🎯 Использовать фрибет {fb[1]}💰", callback_data=f"usefree_{fb[0]}"))
         safe_send(message.chat.id, f"🎁 Ваши фрибеты (доступно: {len(available_freebets)}):", kb)
     else:
-        if user_freebet_count > 0:
-            safe_send(message.chat.id, "⚠️ Фрибеты восстанавливаются...")
-            conn = sqlite3.connect('hockey_bets.db')
-            c = conn.cursor()
-            needed = user_freebet_count - len(available_freebets)
-            for i in range(needed):
-                amount = 500
-                c.execute("""INSERT INTO bets (user_id, username, match_id, team, amount, coefficient, bet_type, status, bet_time) 
-                             VALUES (?, (SELECT username FROM users WHERE user_id=?), 0, 'ВОССТАНОВЛЕННЫЙ ФРИБЕТ', ?, 1.0, 'freebet', 'pending', ?)""",
-                    (uid, uid, amount, msk_now().strftime("%d.%m.%Y %H:%M")))
-            conn.commit()
-            conn.close()
-            show_freebets(message)
-        else:
-            safe_send(message.chat.id, "🎁 У вас нет фрибетов.")
+        safe_send(message.chat.id, "🎁 У вас нет активных фрибетов.")
 
 @bot.message_handler(func=lambda m: m.text == "📋 КВЕСТЫ")
 def show_quests(message):
@@ -385,7 +355,7 @@ def show_quests(message):
                 txt += f"🟢 #{qid}: {desc} [ВЫПОЛНЕНО]\n"
             else:
                 current = total_bets if qtype == 'bets' else total_wins
-                txt += f"🟡 #{qid}: {desc}\n🎯 {current}/{target}\n🎁 1 фрибет на {fb_amt} тенге\n\n"
+                txt += f"🟡 #{qid}: {desc}\n🎯 {current}/{target}\n🎁 1 фрибет на {fb_amt} экстракойнов\n\n"
     else:
         txt += "Пока нет активных квестов"
     safe_send(message.chat.id, txt)
@@ -400,7 +370,7 @@ def top10(message):
     txt = "🏆 ТОП-10 БОГАТЕЙШИХ:\n\n" if users else "Пусто"
     for i, u in enumerate(users, 1):
         medal = "🥇" if i==1 else "🥈" if i==2 else "🥉" if i==3 else f"{i}."
-        txt += f"{medal} {u[0]}: 💰{u[1]} тенге\n"
+        txt += f"{medal} {u[0]}: 💰{u[1]} экстракойнов\n"
     safe_send(message.chat.id, txt)
 
 @bot.message_handler(func=lambda m: m.text == "🔧 АДМИН")
@@ -420,27 +390,28 @@ def menu(message):
 @bot.message_handler(func=lambda m: m.text == "➕ МАТЧ")
 def add_match(message):
     if message.from_user.id != ADMIN_ID: return
-    msg = safe_send(message.chat.id, "➕ Формат: ЛИГА | Команда1 vs Команда2 | ДД.ММ.ГГГГ ЧЧ:ММ | П1 П2 Н П1ОТ П2ОТ Тотал ТБ ТМ\n\nПример: БХМ | Салават Юлаев vs Ак Барс | 25.12.2024 19:00 | 2.3 2.3 3.5 3.5 3.5 5.5 1.9 1.9")
+    msg = safe_send(message.chat.id, f"➕ Добавление матча БХМ\n\nФормат: Команда1 vs Команда2 | ДД.ММ.ГГГГ ЧЧ:ММ | П1 П2 Н П1ОТ П2ОТ Тотал ТБ ТМ\n\nПример: Салават Юлаев vs Ак Барс | 25.12.2024 19:00 | 2.3 2.3 3.5 3.5 3.5 5.5 1.9 1.9")
     bot.register_next_step_handler(msg, add_match_step2)
 
 def add_match_step2(message):
     try:
         p = message.text.split('|')
-        l, t, d = p[0].strip(), p[1].strip(), p[2].strip()
+        t = p[0].strip()
+        d = p[1].strip()
         t1, t2 = t.split(' vs ')
         datetime.strptime(d, "%d.%m.%Y %H:%M")
-        coefs = list(map(float, p[3].strip().split())) if len(p) >= 4 else []
+        coefs = list(map(float, p[2].strip().split())) if len(p) >= 3 else []
         conn = sqlite3.connect('hockey_bets.db')
         c = conn.cursor()
         if len(coefs) >= 8:
             c.execute("""INSERT INTO matches (league,team1,team2,match_date,coef1,coef2,coef_draw,coef_ot1,coef_ot2,total_line,coef_over,coef_under) 
                          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (l, t1.strip(), t2.strip(), d, coefs[0], coefs[1], coefs[2], coefs[3], coefs[4], coefs[5], coefs[6], coefs[7]))
+                (LEAGUE, t1.strip(), t2.strip(), d, coefs[0], coefs[1], coefs[2], coefs[3], coefs[4], coefs[5], coefs[6], coefs[7]))
         else: 
-            c.execute("INSERT INTO matches (league,team1,team2,match_date) VALUES (?,?,?,?)", (l, t1.strip(), t2.strip(), d))
+            c.execute("INSERT INTO matches (league,team1,team2,match_date) VALUES (?,?,?,?)", (LEAGUE, t1.strip(), t2.strip(), d))
         conn.commit()
         conn.close()
-        safe_send(message.chat.id, f"✅ Матч добавлен!\n{l}\n⚔ {t1} vs {t2}\n📅 {d}")
+        safe_send(message.chat.id, f"✅ Матч добавлен!\n🏒 {LEAGUE}\n⚔ {t1} vs {t2}\n📅 {d} МСК")
     except Exception as e:
         safe_send(message.chat.id, f"❌ Ошибка! {str(e)}")
 
@@ -449,16 +420,16 @@ def admin_matches(message):
     if message.from_user.id != ADMIN_ID: return
     conn = sqlite3.connect('hockey_bets.db')
     c = conn.cursor()
-    c.execute("SELECT match_id, league, team1, team2, match_date, status, winner, score FROM matches ORDER BY match_date DESC LIMIT 20")
+    c.execute("SELECT match_id, league, team1, team2, match_date, status, winner, score FROM matches WHERE league=? ORDER BY match_date DESC LIMIT 20", (LEAGUE,))
     ms = c.fetchall()
     conn.close()
     if not ms:
         safe_send(message.chat.id, "Нет матчей")
         return
-    txt = "📋 СПИСОК МАТЧЕЙ:\n\n"
+    txt = f"📋 МАТЧИ {LEAGUE}:\n\n"
     for m in ms:
         status_emoji = "🟢" if m[5]=='upcoming' else "🔴"
-        txt += f"{status_emoji} #{m[0]}: {m[2]} vs {m[3]} ({m[1]}) | {m[4]}"
+        txt += f"{status_emoji} #{m[0]}: {m[2]} vs {m[3]} | {m[4]} МСК"
         if m[6]: txt += f" | Победитель: {m[6]}"
         if m[7]: txt += f" | Счёт: {m[7]}"
         txt += "\n"
@@ -469,13 +440,13 @@ def set_result_start(message):
     if message.from_user.id != ADMIN_ID: return
     conn = sqlite3.connect('hockey_bets.db')
     c = conn.cursor()
-    c.execute("SELECT match_id, team1, team2, match_date FROM matches WHERE status='upcoming' ORDER BY match_date")
+    c.execute("SELECT match_id, team1, team2, match_date FROM matches WHERE status='upcoming' AND league=? ORDER BY match_date", (LEAGUE,))
     ms = c.fetchall()
     conn.close()
     if ms:
         kb = types.InlineKeyboardMarkup(row_width=1)
         for m in ms: 
-            kb.add(types.InlineKeyboardButton(f"#{m[0]} {m[1]} vs {m[2]} | {m[3]}", callback_data=f"setres_{m[0]}"))
+            kb.add(types.InlineKeyboardButton(f"#{m[0]} {m[1]} vs {m[2]} | {m[3]} МСК", callback_data=f"setres_{m[0]}"))
         safe_send(message.chat.id, "🏆 Выберите матч для установки результата:", kb)
     else: 
         safe_send(message.chat.id, "Нет активных матчей для завершения")
@@ -485,11 +456,11 @@ def view_bets(message):
     if message.from_user.id != ADMIN_ID: return
     conn = sqlite3.connect('hockey_bets.db')
     c = conn.cursor()
-    c.execute("SELECT match_id, team1, team2 FROM matches WHERE status='upcoming' ORDER BY match_date LIMIT 15")
+    c.execute("SELECT match_id, team1, team2 FROM matches WHERE status='upcoming' AND league=? ORDER BY match_date LIMIT 15", (LEAGUE,))
     ms = c.fetchall()
     conn.close()
     if not ms: 
-        safe_send(message.chat.id, "Нет активных матчей"); 
+        safe_send(message.chat.id, "Нет активных матчей")
         return
     kb = types.InlineKeyboardMarkup(row_width=1)
     for m in ms: 
@@ -533,7 +504,7 @@ def add_cup_step2(message):
 @bot.message_handler(func=lambda m: m.text == "🎫 ПРОМО")
 def create_promo(message):
     if message.from_user.id != ADMIN_ID: return
-    msg = safe_send(message.chat.id, "🎫 Варианты:\n1. КОД | СУММА | КОЛ-ВО\n2. СУММА КОЛ-ВО (код сгенерируется автоматически)\n\nПример: BONUS100 | 500 | 10")
+    msg = safe_send(message.chat.id, "🎫 Варианты:\n1. КОД | СУММА | КОЛ-ВО\n2. СУММА КОЛ-ВО (код сгенерируется)\n\nПример: BONUS100 | 500 | 10")
     bot.register_next_step_handler(msg, create_promo_step2)
 
 def create_promo_step2(message):
@@ -550,7 +521,7 @@ def create_promo_step2(message):
         c.execute("INSERT INTO promocodes (code, freebet_amount, max_uses) VALUES (?,?,?)", (code, amt, mx))
         conn.commit()
         conn.close()
-        safe_send(message.chat.id, f"✅ Промокод создан!\nКод: {code}\nСумма фрибета: {amt} тенге\nКол-во использований: {mx}")
+        safe_send(message.chat.id, f"✅ Промокод создан!\nКод: {code}\nСумма фрибета: {amt} экстракойнов\nКол-во использований: {mx}")
     except: 
         safe_send(message.chat.id, "❌ Ошибка! Проверьте формат.")
 
@@ -568,9 +539,9 @@ def give_money_step2(message):
         c.execute("UPDATE users SET balance=balance+? WHERE user_id=?", (int(p[1]), int(p[0])))
         conn.commit()
         conn.close()
-        safe_send(message.chat.id, f"✅ Выдано {p[1]} тенге пользователю {p[0]}!")
+        safe_send(message.chat.id, f"✅ Выдано {p[1]} экстракойнов пользователю {p[0]}!")
         try:
-            bot.send_message(int(p[0]), f"💰 Администратор выдал вам {p[1]} тенге!")
+            bot.send_message(int(p[0]), f"💰 Администратор выдал вам {p[1]} экстракойнов!")
         except:
             pass
     except: 
@@ -592,12 +563,12 @@ def give_freebet_step2(message):
         c.execute("UPDATE users SET freebets=freebets+1 WHERE user_id=?", (user_id,))
         c.execute("""INSERT INTO bets (user_id, username, match_id, team, amount, coefficient, bet_type, status, bet_time) 
                      VALUES (?, (SELECT username FROM users WHERE user_id=?), 0, 'ФРИБЕТ ОТ АДМИНА', ?, 1.0, 'freebet', 'pending', ?)""",
-            (user_id, user_id, amount, msk_now().strftime("%d.%m.%Y %H:%M")))
+            (user_id, user_id, amount, msk_str()))
         conn.commit()
         conn.close()
-        safe_send(message.chat.id, f"✅ Фрибет на {amount} тенге выдан пользователю {user_id}!")
+        safe_send(message.chat.id, f"✅ Фрибет на {amount} экстракойнов выдан пользователю {user_id}!")
         try:
-            bot.send_message(user_id, f"🎁 Администратор выдал вам фрибет на {amount} тенге!")
+            bot.send_message(user_id, f"🎁 Администратор выдал вам фрибет на {amount} экстракойнов!")
         except:
             pass
     except: 
@@ -633,10 +604,10 @@ def add_quest_step2(message):
         c = conn.cursor()
         c.execute("""INSERT INTO quests (description, quest_type, target, freebet_amount, duration_hours, created_date, is_active) 
                      VALUES (?,?,?,?,?,?,1)""",
-            (desc, qtype, target, freebet, duration, msk_now().strftime("%d.%m.%Y %H:%M")))
+            (desc, qtype, target, freebet, duration, msk_str()))
         conn.commit()
         conn.close()
-        safe_send(message.chat.id, f"✅ Квест создан!\n{desc}\n🎯 {qtype} {target}\n🎁 Фрибет на {freebet} тенге\n⏰ Длительность: {duration}ч")
+        safe_send(message.chat.id, f"✅ Квест создан!\n{desc}\n🎯 {qtype} {target}\n🎁 Фрибет на {freebet} экстракойнов\n⏰ Длительность: {duration}ч")
     except Exception as e:
         safe_send(message.chat.id, f"❌ Ошибка! {str(e)}")
 
@@ -646,49 +617,46 @@ def handle_photo(message):
     if uid != ADMIN_ID:
         bot.reply_to(message, "❌ Только администратор может загружать фото")
         return
-        
     if uid in user_match_creation and 'photo_type' in user_match_creation[uid]:
         pt = user_match_creation[uid]['photo_type']
         fid = message.photo[-1].file_id
-        
         conn = sqlite3.connect('hockey_bets.db')
         c = conn.cursor()
         c.execute("DELETE FROM photos WHERE photo_type=?", (pt,))
         c.execute("INSERT INTO photos (photo_type, file_id, added_date) VALUES (?,?,?)", 
-                 (pt, fid, msk_now().strftime("%d.%m.%Y %H:%M")))
+                 (pt, fid, msk_str()))
         conn.commit()
         conn.close()
-        
         safe_send(message.chat.id, f"✅ Фото {'🏆 ПОБЕДЫ' if pt=='win' else '💔 ПОРАЖЕНИЯ'} обновлено!")
         del user_match_creation[uid]
     else:
         safe_send(message.chat.id, "❌ Сначала выберите тип фото в меню Админ -> Фото")
 
-# ========== CALLBACK ОБРАБОТЧИК (ГЛАВНЫЙ) ==========
+# ========== CALLBACK ОБРАБОТЧИК ==========
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
     uid = call.from_user.id
     d = call.data
     
-    print(f"📱 Получен callback: {d} от user {uid}")
+    print(f"📱 Callback: {d} от {uid}")
     
     if d == "photo_win":
         if uid != ADMIN_ID: 
-            bot.answer_callback_query(call.id, "Доступно только администратору")
+            bot.answer_callback_query(call.id, "Только для админа")
             return
         user_match_creation[uid] = {'photo_type': 'win'}
         bot.answer_callback_query(call.id, "Отправьте фото для ПОБЕДЫ")
         return
     elif d == "photo_lose":
         if uid != ADMIN_ID: 
-            bot.answer_callback_query(call.id, "Доступно только администратору")
+            bot.answer_callback_query(call.id, "Только для админа")
             return
         user_match_creation[uid] = {'photo_type': 'lose'}
         bot.answer_callback_query(call.id, "Отправьте фото для ПОРАЖЕНИЯ")
         return
     elif d == "photo_show":
         if uid != ADMIN_ID: 
-            bot.answer_callback_query(call.id, "Доступно только администратору")
+            bot.answer_callback_query(call.id, "Только для админа")
             return
         for t, n in [('win','🏆 Фото победы'), ('lose','💔 Фото поражения')]:
             p = get_photo(t)
@@ -702,31 +670,18 @@ def callback_handler(call):
         bot.answer_callback_query(call.id)
         return
     
-    elif d.startswith("league_"):
-        league = d.split("_")[1]
+    elif d == "refresh_matches":
         try:
-            bot.edit_message_text(f"🏒 {league}", call.message.chat.id, call.message.message_id, reply_markup=matches_keyboard(league))
+            bot.edit_message_text(f"🏒 ЛИГА {LEAGUE}\n\nВыберите матч:", call.message.chat.id, call.message.message_id, reply_markup=matches_keyboard())
         except:
-            safe_send(call.message.chat.id, f"🏒 {league}", matches_keyboard(league))
-    
-    elif d == "back_to_leagues":
-        try:
-            bot.edit_message_text("🏒 ВЫБЕРИТЕ ЛИГУ:", call.message.chat.id, call.message.message_id, reply_markup=league_keyboard())
-        except:
-            safe_send(call.message.chat.id, "🏒 ВЫБЕРИТЕ ЛИГУ:", league_keyboard())
-    
-    elif d.startswith("refresh_"):
-        league = d.split("_")[1]
-        try:
-            bot.edit_message_text("🔄 Обновлено", call.message.chat.id, call.message.message_id, reply_markup=matches_keyboard(league))
-        except:
-            safe_send(call.message.chat.id, "🔄 Обновлено", matches_keyboard(league))
+            safe_send(call.message.chat.id, f"🏒 ЛИГА {LEAGUE}\n\nВыберите матч:", matches_keyboard())
+        bot.answer_callback_query(call.id, "🔄 Обновлено")
     
     elif d == "back_to_matches":
         try:
-            bot.edit_message_text("🎯 Выберите матч:", call.message.chat.id, call.message.message_id, reply_markup=league_keyboard())
+            bot.edit_message_text(f"🏒 ЛИГА {LEAGUE}\n\nВыберите матч:", call.message.chat.id, call.message.message_id, reply_markup=matches_keyboard())
         except:
-            safe_send(call.message.chat.id, "🎯 Выберите матч:", league_keyboard())
+            safe_send(call.message.chat.id, f"🏒 ЛИГА {LEAGUE}\n\nВыберите матч:", matches_keyboard())
     
     elif d == "none":
         bot.answer_callback_query(call.id, "Нет матчей")
@@ -734,7 +689,7 @@ def callback_handler(call):
     
     elif d.startswith("viewbets_"):
         if uid != ADMIN_ID: 
-            bot.answer_callback_query(call.id, "Доступно только администратору")
+            bot.answer_callback_query(call.id, "Только для админа")
             return
         mid = int(d.split("_")[1])
         conn = sqlite3.connect('hockey_bets.db')
@@ -762,7 +717,7 @@ def callback_handler(call):
     
     elif d.startswith("setres_"):
         if uid != ADMIN_ID: 
-            bot.answer_callback_query(call.id, "Доступно только администратору")
+            bot.answer_callback_query(call.id, "Только для админа")
             return
         mid = int(d.split("_")[1])
         conn = sqlite3.connect('hockey_bets.db')
@@ -783,7 +738,7 @@ def callback_handler(call):
     
     elif d.startswith("winner_"):
         if uid != ADMIN_ID: 
-            bot.answer_callback_query(call.id, "Доступно только администратору")
+            bot.answer_callback_query(call.id, "Только для админа")
             return
         parts = d.split("_", 2)
         mid = int(parts[1])
@@ -800,17 +755,36 @@ def callback_handler(call):
         c.execute("SELECT * FROM matches WHERE match_id=?", (mid,))
         m = c.fetchone()
         conn.close()
-        if m:
-            txt = f"⚔ {m[2]} vs {m[3]} ({m[1]})\n📅 {m[4]} МСК\n\nКоэффициенты:\nП1: {m[5]} | Ничья: {m[7]} | П2: {m[6]}\nТотал {m[10]}: ТБ={m[11]} | ТМ={m[12]}\n🎯 Точный счёт: x25"
-            try:
-                bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=bet_keyboard(mid))
-            except:
-                safe_send(call.message.chat.id, txt, bet_keyboard(mid))
+        if not m:
+            bot.answer_callback_query(call.id, "❌ Матч не найден!", show_alert=True)
+            return
+        
+        # ✅ ГЛАВНАЯ ПРОВЕРКА: матч ещё не начался
+        if is_match_started(m[4]):
+            bot.answer_callback_query(call.id, "⏰ Матч уже начался! Ставки закрыты.", show_alert=True)
+            return
+        
+        txt = f"⚔ {m[2]} vs {m[3]} ({m[1]})\n📅 {m[4]} МСК\n\nКоэффициенты:\nП1: {m[5]} | Ничья: {m[7]} | П2: {m[6]}\nТотал {m[10]}: ТБ={m[11]} | ТМ={m[12]}\n🎯 Точный счёт: x25"
+        try:
+            bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=bet_keyboard(mid))
+        except:
+            safe_send(call.message.chat.id, txt, bet_keyboard(mid))
     
     elif d.startswith("betsum_"):
         parts = d.split("_")
         mid = int(parts[1])
         team = parts[2]
+        
+        # ✅ Проверка перед ставкой
+        conn = sqlite3.connect('hockey_bets.db')
+        c = conn.cursor()
+        c.execute("SELECT match_date FROM matches WHERE match_id=?", (mid,))
+        row = c.fetchone()
+        conn.close()
+        if not row or is_match_started(row[0]):
+            bot.answer_callback_query(call.id, "⏰ Матч уже начался! Ставки закрыты.", show_alert=True)
+            return
+        
         label = "Тотал БОЛЬШЕ" if team == 'over' else "Тотал МЕНЬШЕ" if team == 'under' else team
         try:
             bot.edit_message_text(f"💰 Ставка: {label}\n\nВыберите сумму:", call.message.chat.id, call.message.message_id, reply_markup=sum_keyboard(mid, team))
@@ -823,10 +797,16 @@ def callback_handler(call):
         
         conn = sqlite3.connect('hockey_bets.db')
         c = conn.cursor()
-        c.execute("SELECT team1, team2, coef1, coef2, coef_draw, total_line, coef_over, coef_under FROM matches WHERE match_id=?", (mid,))
+        c.execute("SELECT team1, team2, coef1, coef2, coef_draw, total_line, coef_over, coef_under, match_date FROM matches WHERE match_id=?", (mid,))
         m = c.fetchone()
         if not m:
             bot.answer_callback_query(call.id, "❌ Матч не найден!", show_alert=True)
+            conn.close()
+            return
+        
+        # ✅ Проверка: матч ещё не начался
+        if is_match_started(m[8]):
+            bot.answer_callback_query(call.id, "⏰ Матч уже начался! Ставки закрыты.", show_alert=True)
             conn.close()
             return
             
@@ -847,13 +827,12 @@ def callback_handler(call):
             c.execute("UPDATE users SET balance=balance-?, total_bets=total_bets+1 WHERE user_id=?", (amt, uid))
             c.execute("""INSERT INTO bets (user_id, username, match_id, team, amount, coefficient, bet_type, status, bet_time) 
                          VALUES (?,?,?,?,?,?,?,?,?)""", 
-                (uid, call.from_user.username or "User", mid, team, amt, coef, bet_type, 'pending', 
-                 msk_now().strftime("%d.%m.%Y %H:%M")))
+                (uid, call.from_user.username or "User", mid, team, amt, coef, bet_type, 'pending', msk_str()))
             conn.commit()
             
             rewards = check_and_claim_quests(uid)
             
-            msg = f"✅ СТАВКА ПРИНЯТА!\n🎯 {team}\n💰 {amt} тенге (x{coef})"
+            msg = f"✅ СТАВКА ПРИНЯТА!\n🎯 {team}\n💰 {amt} экстракойнов (x{coef})"
             if rewards: msg += "\n\n🎁 ВЫПОЛНЕНЫ КВЕСТЫ:\n" + "\n".join(rewards)
             
             bot.answer_callback_query(call.id, "✅ Ставка принята!")
@@ -862,23 +841,40 @@ def callback_handler(call):
             except:
                 safe_send(call.message.chat.id, msg)
         else: 
-            bot.answer_callback_query(call.id, "❌ Недостаточно тенге!", show_alert=True)
+            bot.answer_callback_query(call.id, "❌ Недостаточно экстракойнов!", show_alert=True)
         conn.close()
     
     elif d.startswith("custom_"):
         parts = d.split("_")
         mid, team = int(parts[1]), parts[2]
+        
+        # ✅ Проверка перед вводом суммы
+        conn = sqlite3.connect('hockey_bets.db')
+        c = conn.cursor()
+        c.execute("SELECT match_date FROM matches WHERE match_id=?", (mid,))
+        row = c.fetchone()
+        conn.close()
+        if not row or is_match_started(row[0]):
+            bot.answer_callback_query(call.id, "⏰ Матч уже начался! Ставки закрыты.", show_alert=True)
+            return
+        
         msg = safe_send(call.message.chat.id, f"💵 Введите сумму для ставки на {team}:")
         bot.register_next_step_handler(msg, process_custom, mid, team)
         bot.answer_callback_query(call.id)
     
     elif d.startswith("exact_"):
         mid = int(d.split("_")[1])
+        
+        # ✅ Проверка перед вводом точного счёта
         conn = sqlite3.connect('hockey_bets.db')
         c = conn.cursor()
-        c.execute("SELECT team1, team2 FROM matches WHERE match_id=?", (mid,))
+        c.execute("SELECT team1, team2, match_date FROM matches WHERE match_id=?", (mid,))
         m = c.fetchone()
         conn.close()
+        if not m or is_match_started(m[2]):
+            bot.answer_callback_query(call.id, "⏰ Матч уже начался! Ставки закрыты.", show_alert=True)
+            return
+        
         msg = safe_send(call.message.chat.id, f"🎯 ТОЧНЫЙ СЧЁТ (x25)\n{m[0]} vs {m[1]}\n\nВведите счёт (пример: 3:2):")
         bot.register_next_step_handler(msg, process_exact, mid)
         bot.answer_callback_query(call.id)
@@ -894,18 +890,20 @@ def callback_handler(call):
         if fb:
             conn = sqlite3.connect('hockey_bets.db')
             c = conn.cursor()
-            c.execute("SELECT match_id, team1, team2, league FROM matches WHERE status='upcoming' ORDER BY match_date")
-            ms = c.fetchall()
+            c.execute("SELECT match_id, team1, team2, league, match_date FROM matches WHERE status='upcoming' AND league=? ORDER BY match_date", (LEAGUE,))
+            all_ms = c.fetchall()
             conn.close()
+            
+            ms = [m for m in all_ms if not is_match_started(m[4])]
             
             if ms:
                 kb = types.InlineKeyboardMarkup(row_width=1)
                 for m in ms: 
                     kb.add(types.InlineKeyboardButton(f"⚔ {m[1]} vs {m[2]} ({m[3]})", callback_data=f"freebet_{bid}_{m[0]}"))
                 try:
-                    bot.edit_message_text(f"🎯 Выберите матч для фрибета\n💰 Сумма: {fb[0]} тенге", call.message.chat.id, call.message.message_id, reply_markup=kb)
+                    bot.edit_message_text(f"🎯 Выберите матч для фрибета\n💰 Сумма: {fb[0]} экстракойнов", call.message.chat.id, call.message.message_id, reply_markup=kb)
                 except:
-                    safe_send(call.message.chat.id, f"🎯 Выберите матч для фрибета\n💰 Сумма: {fb[0]} тенге", kb)
+                    safe_send(call.message.chat.id, f"🎯 Выберите матч для фрибета\n💰 Сумма: {fb[0]} экстракойнов", kb)
             else:
                 bot.answer_callback_query(call.id, "Нет доступных матчей для ставки")
         else:
@@ -916,9 +914,13 @@ def callback_handler(call):
         bid, mid = int(parts[1]), int(parts[2])
         conn = sqlite3.connect('hockey_bets.db')
         c = conn.cursor()
-        c.execute("SELECT team1, team2, coef1, coef2, coef_draw FROM matches WHERE match_id=?", (mid,))
+        c.execute("SELECT team1, team2, coef1, coef2, coef_draw, match_date FROM matches WHERE match_id=?", (mid,))
         m = c.fetchone()
         conn.close()
+        
+        if not m or is_match_started(m[5]):
+            bot.answer_callback_query(call.id, "⏰ Матч уже начался! Ставки закрыты.", show_alert=True)
+            return
         
         kb = types.InlineKeyboardMarkup(row_width=1)
         kb.add(types.InlineKeyboardButton(f"✅ {m[0]} x{m[2]}", callback_data=f"freebetp_{bid}_{mid}_{m[0]}_{m[2]}"))
@@ -943,16 +945,24 @@ def callback_handler(call):
             conn.close()
             bot.answer_callback_query(call.id, "❌ Фрибет не найден!", show_alert=True)
             return
+        
+        # ✅ Проверка: матч ещё не начался
+        c.execute("SELECT match_date FROM matches WHERE match_id=?", (mid,))
+        md = c.fetchone()
+        if not md or is_match_started(md[0]):
+            bot.answer_callback_query(call.id, "⏰ Матч уже начался! Ставки закрыты.", show_alert=True)
+            conn.close()
+            return
             
         amt = result[0]
         c.execute("""UPDATE bets SET match_id=?, team=?, coefficient=?, bet_type='freebet_active', status='pending', bet_time=? 
-                     WHERE bet_id=?""", (mid, team, coef, msk_now().strftime("%d.%m.%Y %H:%M"), bid))
+                     WHERE bet_id=?""", (mid, team, coef, msk_str(), bid))
         c.execute("UPDATE users SET freebets=freebets-1 WHERE user_id=?", (uid,))
         conn.commit()
         
         rewards = check_and_claim_quests(uid)
         
-        msg = f"✅ Фрибет активирован!\n🎯 {team}\n💰 {amt} тенге (x{coef})"
+        msg = f"✅ Фрибет активирован!\n🎯 {team}\n💰 {amt} экстракойнов (x{coef})"
         if rewards: msg += "\n\n🎁 ВЫПОЛНЕНЫ КВЕСТЫ:\n" + "\n".join(rewards)
         
         conn.close()
@@ -1027,12 +1037,12 @@ def callback_handler(call):
             c.execute("UPDATE users SET balance=balance-?, total_bets=total_bets+1 WHERE user_id=?", (amount, uid))
             c.execute("""INSERT INTO bets (user_id, username, match_id, team, amount, coefficient, bet_type, status, bet_time) 
                          VALUES (?,?,0,?,?,?,'cup','pending',?)""", 
-                (uid, call.from_user.username or "User", team_name, amount, coef, msk_now().strftime("%d.%m.%Y %H:%M")))
+                (uid, call.from_user.username or "User", team_name, amount, coef, msk_str()))
             conn.commit()
             
             rewards = check_and_claim_quests(uid)
             
-            msg = f"✅ СТАВКА НА КУБОК ПРИНЯТА!\n🏆 {team_name}\n💰 {amount} тенге (x{coef})"
+            msg = f"✅ СТАВКА НА КУБОК ПРИНЯТА!\n🏆 {team_name}\n💰 {amount} экстракойнов (x{coef})"
             if rewards: msg += "\n\n🎁 ВЫПОЛНЕНЫ КВЕСТЫ:\n" + "\n".join(rewards)
             
             bot.answer_callback_query(call.id, "✅ Ставка принята!")
@@ -1041,12 +1051,12 @@ def callback_handler(call):
             except:
                 safe_send(call.message.chat.id, msg)
         else: 
-            bot.answer_callback_query(call.id, "❌ Недостаточно тенге!", show_alert=True)
+            bot.answer_callback_query(call.id, "❌ Недостаточно экстракойнов!", show_alert=True)
         conn.close()
     
     elif d.startswith("cupres_"):
         if uid != ADMIN_ID: 
-            bot.answer_callback_query(call.id, "Доступно только администратору")
+            bot.answer_callback_query(call.id, "Только для админа")
             return
         league = d.split("_")[1]
         conn = sqlite3.connect('hockey_bets.db')
@@ -1066,7 +1076,7 @@ def callback_handler(call):
     
     elif d.startswith("cupwinner_"):
         if uid != ADMIN_ID: 
-            bot.answer_callback_query(call.id, "Доступно только администратору")
+            bot.answer_callback_query(call.id, "Только для админа")
             return
         parts = d.split("_", 2)
         league = parts[1]
@@ -1082,7 +1092,7 @@ def callback_handler(call):
                 c.execute("UPDATE users SET balance=balance+?, wins=wins+1 WHERE user_id=?", (winnings, b[1]))
                 c.execute("UPDATE bets SET status='won' WHERE bet_id=?", (b[0],))
                 try:
-                    bot.send_message(b[1], f"🎉 ПОБЕДА В КУБКЕ {league}!\n🏆 {winner}\n💰 Выигрыш: {winnings} тенге")
+                    bot.send_message(b[1], f"🎉 ПОБЕДА В КУБКЕ {league}!\n🏆 {winner}\n💰 Выигрыш: {winnings} экстракойнов")
                 except:
                     pass
             else: 
@@ -1130,30 +1140,30 @@ def process_result(message, mid, winner):
                 winnings = int(amt * coef)
                 c.execute("UPDATE users SET balance=balance+?, wins=wins+1 WHERE user_id=?", (winnings, buid))
                 c.execute("UPDATE bets SET status='won' WHERE bet_id=?", (bid,))
-                safe_send(buid, f"🎉 ТБ {total_line} ВЫИГРАЛ!\n⚽ Голов забито: {total_goals}\n💰 Выигрыш: {winnings} тенге")
+                safe_send(buid, f"🎉 ТБ {total_line} ВЫИГРАЛ!\n⚽ Голов забито: {total_goals}\n💰 Выигрыш: {winnings} экстракойнов")
             else:
                 c.execute("UPDATE bets SET status='lost' WHERE bet_id=?", (bid,))
-                safe_send(buid, f"💔 ТБ {total_line} ПРОИГРАЛ\n⚽ Голов забито: {total_goals}\n💵 Потеря: {amt} тенге")
+                safe_send(buid, f"💔 ТБ {total_line} ПРОИГРАЛ\n⚽ Голов забито: {total_goals}\n💵 Потеря: {amt} экстракойнов")
         
         elif bt == 'under':
             if total_goals < total_line:
                 winnings = int(amt * coef)
                 c.execute("UPDATE users SET balance=balance+?, wins=wins+1 WHERE user_id=?", (winnings, buid))
                 c.execute("UPDATE bets SET status='won' WHERE bet_id=?", (bid,))
-                safe_send(buid, f"🎉 ТМ {total_line} ВЫИГРАЛ!\n⚽ Голов забито: {total_goals}\n💰 Выигрыш: {winnings} тенге")
+                safe_send(buid, f"🎉 ТМ {total_line} ВЫИГРАЛ!\n⚽ Голов забито: {total_goals}\n💰 Выигрыш: {winnings} экстракойнов")
             else:
                 c.execute("UPDATE bets SET status='lost' WHERE bet_id=?", (bid,))
-                safe_send(buid, f"💔 ТМ {total_line} ПРОИГРАЛ\n⚽ Голов забито: {total_goals}\n💵 Потеря: {amt} тенге")
+                safe_send(buid, f"💔 ТМ {total_line} ПРОИГРАЛ\n⚽ Голов забито: {total_goals}\n💵 Потеря: {amt} экстракойнов")
         
         elif bt == 'exact':
             if team == score:
                 winnings = int(amt * coef)
                 c.execute("UPDATE users SET balance=balance+?, wins=wins+1 WHERE user_id=?", (winnings, buid))
                 c.execute("UPDATE bets SET status='won' WHERE bet_id=?", (bid,))
-                safe_send(buid, f"🎉 ТОЧНЫЙ СЧЁТ {score} УГАДАН!\n💰 Выигрыш: {winnings} тенге")
+                safe_send(buid, f"🎉 ТОЧНЫЙ СЧЁТ {score} УГАДАН!\n💰 Выигрыш: {winnings} экстракойнов")
             else:
                 c.execute("UPDATE bets SET status='lost' WHERE bet_id=?", (bid,))
-                safe_send(buid, f"💔 Точный счёт не угадан\nВаш счёт: {team}\nРеальный счёт: {score}\n💵 Потеря: {amt} тенге")
+                safe_send(buid, f"💔 Точный счёт не угадан\nВаш счёт: {team}\nРеальный счёт: {score}\n💵 Потеря: {amt} экстракойнов")
         
         elif team == winner:
             winnings = int(amt * coef)
@@ -1161,7 +1171,7 @@ def process_result(message, mid, winner):
             c.execute("UPDATE bets SET status='won' WHERE bet_id=?", (bid,))
             
             photo = get_photo('win')
-            msg = f"🎉 СТАВКА ВЫИГРАЛА!\n{m[0]} vs {m[1]}\n✅ {winner} ({score})\n💰 Выигрыш: {winnings} тенге (ставка {amt} × кэф {coef})"
+            msg = f"🎉 СТАВКА ВЫИГРАЛА!\n{m[0]} vs {m[1]}\n✅ {winner} ({score})\n💰 Выигрыш: {winnings} экстракойнов (ставка {amt} × кэф {coef})"
             if photo:
                 try: bot.send_photo(buid, photo, caption=msg)
                 except: safe_send(buid, msg)
@@ -1170,7 +1180,7 @@ def process_result(message, mid, winner):
         else:
             c.execute("UPDATE bets SET status='lost' WHERE bet_id=?", (bid,))
             photo = get_photo('lose')
-            msg = f"💔 СТАВКА ПРОИГРАЛА\n{m[0]} vs {m[1]}\n🏆 {winner} ({score})\n💵 Потеря: {amt} тенге"
+            msg = f"💔 СТАВКА ПРОИГРАЛА\n{m[0]} vs {m[1]}\n🏆 {winner} ({score})\n💵 Потеря: {amt} экстракойнов"
             if photo:
                 try: bot.send_photo(buid, photo, caption=msg)
                 except: safe_send(buid, msg)
@@ -1191,6 +1201,16 @@ def process_exact(message, mid):
             safe_send(message.chat.id, "❌ Неверный формат! Пример: 3:2")
             return
         
+        # ✅ Проверка: матч не начался
+        conn = sqlite3.connect('hockey_bets.db')
+        c = conn.cursor()
+        c.execute("SELECT match_date FROM matches WHERE match_id=?", (mid,))
+        row = c.fetchone()
+        conn.close()
+        if not row or is_match_started(row[0]):
+            safe_send(message.chat.id, "⏰ Матч уже начался! Ставки закрыты.")
+            return
+        
         kb = types.InlineKeyboardMarkup(row_width=3)
         for amt in [50, 100, 250, 500, 1000]:
             kb.add(types.InlineKeyboardButton(str(amt), callback_data=f"place_{mid}_{score}_{amt}"))
@@ -1203,13 +1223,18 @@ def process_custom(message, mid, team):
     try:
         amt = int(message.text)
         if amt < 50:
-            safe_send(message.chat.id, "❌ Минимальная сумма ставки: 50 тенге")
+            safe_send(message.chat.id, "❌ Минимальная сумма ставки: 50 экстракойнов")
             return
             
         conn = sqlite3.connect('hockey_bets.db')
         c = conn.cursor()
-        c.execute("SELECT team1, team2, coef1, coef2, coef_draw, total_line, coef_over, coef_under FROM matches WHERE match_id=?", (mid,))
+        c.execute("SELECT team1, team2, coef1, coef2, coef_draw, total_line, coef_over, coef_under, match_date FROM matches WHERE match_id=?", (mid,))
         m = c.fetchone()
+        
+        if not m or is_match_started(m[8]):
+            safe_send(message.chat.id, "⏰ Матч уже начался! Ставки закрыты.")
+            conn.close()
+            return
         
         if team == m[0]: coef = m[2]
         elif team == m[1]: coef = m[3]
@@ -1229,17 +1254,17 @@ def process_custom(message, mid, team):
             c.execute("""INSERT INTO bets (user_id, username, match_id, team, amount, coefficient, bet_type, status, bet_time) 
                          VALUES (?,?,?,?,?,?,?,?,?)""", 
                 (message.from_user.id, message.from_user.username or "User", mid, team, amt, coef, bet_type, 'pending', 
-                 msk_now().strftime("%d.%m.%Y %H:%M")))
+                 msk_str()))
             conn.commit()
             
             rewards = check_and_claim_quests(message.from_user.id)
             
-            msg = f"✅ Ставка {amt} тенге на {team} (x{coef}) принята!"
+            msg = f"✅ Ставка {amt} экстракойнов на {team} (x{coef}) принята!"
             if rewards: msg += "\n\n🎁 ВЫПОЛНЕНЫ КВЕСТЫ:\n" + "\n".join(rewards)
                 
             safe_send(message.chat.id, msg)
         else: 
-            safe_send(message.chat.id, "❌ Недостаточно тенге!")
+            safe_send(message.chat.id, "❌ Недостаточно экстракойнов!")
         conn.close()
     except ValueError:
         safe_send(message.chat.id, "❌ Введите число!")
@@ -1257,6 +1282,7 @@ def run_bot():
     print("🤖 Запускаем бота...")
     init_db()
     print("✅ База данных готова")
+    print(f"⏰ Время МСК: {msk_str()}")
     print("🔄 Бот начал прослушивание сообщений...")
     while True:
         try:
@@ -1269,15 +1295,13 @@ def run_bot():
 # ========== ТОЧКА ВХОДА ==========
 if __name__ == '__main__':
     print("🏒 EXTRABOT ЗАПУСКАЕТСЯ...")
+    print(f"⏰ Время МСК: {msk_str()}")
     
-    # Запускаем бота в потоке
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
     
-    # Ждём инициализации бота
     time.sleep(2)
     print("✅ Бот запущен! Flask сервер готов.")
     
-    # Запускаем Flask
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
